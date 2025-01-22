@@ -69,10 +69,6 @@ static atomic_t swapin_readahead_hits = ATOMIC_INIT(4);
 /* Leap start */
 unsigned long is_custom_prefetch = 0;
 
-atomic_t my_swapin_readahead_hits = ATOMIC_INIT(0);
-atomic_t swapin_readahead_entry = ATOMIC_INIT(0);
-atomic_t trend_found = ATOMIC_INIT(0);
-
 void set_custom_prefetch(unsigned long val){
         is_custom_prefetch = val;
         printk("custom prefetch: %s\n", (is_custom_prefetch != 0) ? "set" : "clear" );
@@ -116,16 +112,6 @@ void inc_size(void) {
         atomic_inc(&trend_history.size);
 }
 
-void init_stat(void) {
-        swap_cache_info.add_total = 0;
-        swap_cache_info.del_total = 0;
-        swap_cache_info.find_success = 0;
-        swap_cache_info.find_total = 0;
-
-        atomic_set(&my_swapin_readahead_hits, 0);
-        atomic_set(&swapin_readahead_entry, 0);
-        atomic_set(&trend_found, 0);
-}
 
 void init_swap_trend(int size) {
 	
@@ -134,8 +120,6 @@ void init_swap_trend(int size) {
 	atomic_set(&trend_history.size, 0);
 	atomic_set(&trend_history.max_size , size);
 	
-	init_stat();
-	printk("swap_trend history initiated for size: %d, head at: %d, curresnt_size: %d\n", atomic_read(&trend_history.max_size), atomic_read(&trend_history.head), atomic_read(&trend_history.size));
 }
 EXPORT_SYMBOL(init_swap_trend);
 
@@ -518,26 +502,26 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 			hits = SWAP_RA_HITS(ra_val);
 			if (readahead)
 				hits = min_t(int, hits + 1, SWAP_RA_HITS_MAX);
-				atomic_long_set(&vma->swap_readahead_info,
+			atomic_long_set(&vma->swap_readahead_info,
 					SWAP_RA_VAL(addr, win, hits));
-				/* Leap */
-				if (get_custom_prefetch() != 0) {
-					log_swap_trend(PFN_DOWN(addr));
-					atomic_inc(&my_swapin_readahead_hits);
-				}
-				/* Leap end*/
+			/* Leap */
+			if (get_custom_prefetch() != 0 && readahead) {
+				log_swap_trend(PFN_DOWN(addr));
+				
+			}
+			/* Leap end*/
 		}
 
 		if (readahead) {
 			count_vm_event(SWAP_RA_HIT);
-			if (!vma || !vma_ra)
+			if (!vma || !vma_ra) {
 				atomic_inc(&swapin_readahead_hits);
 				/* Leap */
 				if (get_custom_prefetch() != 0) {
 					log_swap_trend(swp_offset(entry));
-					atomic_inc(&my_swapin_readahead_hits);
 				}
 				/* Leap end*/
+			}
 		}
 	} else {
 		folio = NULL;
@@ -823,7 +807,6 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 
 	mask = swapin_nr_pages(offset) - 1;
 	/* Leap start */
-	atomic_inc(&swapin_readahead_entry);
 
 	if (get_custom_prefetch() != 0) {
 		int has_trend = 0, depth, major_count;
@@ -831,10 +814,9 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 		has_trend = find_trend(&depth, &major_delta, &major_count);
 		if(has_trend) {
 			int count = 0;
-			atomic_inc(&trend_found);
 			start_offset = offset;
 
-			//blk_start_plug(&plug);
+			blk_start_plug(&plug);
 			for (offset = start_offset; count <= mask; offset += major_delta, count++) {
 				/* Ok, do the async read-ahead now */
 				folio = __read_swap_cache_async(
@@ -851,7 +833,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 				}
 				folio_put(folio);
 			}
-			// blk_finish_plug(&plug);
+			blk_finish_plug(&plug);
 			swap_read_unplug(splug);
 			lru_add_drain();	/* Push any new pages onto the LRU now */
 			goto skip;
@@ -921,8 +903,10 @@ int init_swap_address_space(unsigned int type, unsigned long nr_pages)
 	swapper_spaces[type] = spaces;
 
 	/* Init leap */
-	init_swap_trend(32);
-	set_custom_prefetch(1);
+	if (get_custom_prefetch() == 0) {
+		init_swap_trend(32);
+		set_custom_prefetch(1);
+	}
 
 	return 0;
 }
@@ -959,18 +943,23 @@ static int swap_vma_ra_win(struct vm_fault *vmf, unsigned long *start,
 	win = __swapin_nr_pages(PFN_DOWN(prev_faddr), PFN_DOWN(faddr), hits,
 				max_win, prev_win);
 	atomic_long_set(&vma->swap_readahead_info, SWAP_RA_VAL(faddr, win, 0));
-	if (win == 1)
+	if (win == 1) {
 		return 1;
-
-	if (faddr == prev_faddr + PAGE_SIZE)
+	}
+	
+	if (faddr == prev_faddr + PAGE_SIZE) {
 		left = faddr;
-	else if (prev_faddr == faddr + PAGE_SIZE)
+	}
+	else if (prev_faddr == faddr + PAGE_SIZE) {
 		left = faddr - (win << PAGE_SHIFT) + PAGE_SIZE;
-	else
+	}
+	else {
 		left = faddr - (((win - 1) / 2) << PAGE_SHIFT);
+	}
 	right = left + (win << PAGE_SHIFT);
-	if ((long)left < 0)
+	if ((long)left < 0) {
 		left = 0;
+	}
 	*start = max3(left, vma->vm_start, faddr & PMD_MASK);
 	*end = min3(right, vma->vm_end, (faddr & PMD_MASK) + PMD_SIZE);
 
@@ -1013,7 +1002,6 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 		if (has_trend) {
 			struct vm_area_struct *vma = vmf->vma;
 			
-			atomic_inc(&swapin_readahead_entry);
 			
 			win = swapin_nr_pages(PFN_DOWN(vmf->address));
 			if (major_delta > 0) {
@@ -1029,7 +1017,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 			
 			ilx = targ_ilx - PFN_DOWN(vmf->address - start);
 
-			// blk_start_plug(&plug);
+			blk_start_plug(&plug);
 			for (addr = start; addr < end; ilx += major_delta,
 					addr += PAGE_SIZE * major_delta) {
 				if (!pte++) {
@@ -1060,7 +1048,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 			}
 			if (pte)
 				pte_unmap(pte);
-			// blk_finish_plug(&plug);
+			blk_finish_plug(&plug);
 			swap_read_unplug(splug);
 			lru_add_drain();
 			goto skip;
@@ -1071,35 +1059,35 @@ usual:
 	win = swap_vma_ra_win(vmf, &start, &end);
 	if (win == 1)
 		goto skip;
-		ilx = targ_ilx - PFN_DOWN(vmf->address - start);
+	ilx = targ_ilx - PFN_DOWN(vmf->address - start);
 
-		blk_start_plug(&plug);
-		for (addr = start; addr < end; ilx++, addr += PAGE_SIZE) {
-			if (!pte++) {
-				pte = pte_offset_map(vmf->pmd, addr);
-				if (!pte)
-					break;
+	blk_start_plug(&plug);
+	for (addr = start; addr < end; ilx++, addr += PAGE_SIZE) {
+		if (!pte++) {
+			pte = pte_offset_map(vmf->pmd, addr);
+			if (!pte)
+				break;
+		}
+		pentry = ptep_get_lockless(pte);
+		if (!is_swap_pte(pentry))
+			continue;
+		entry = pte_to_swp_entry(pentry);
+		if (unlikely(non_swap_entry(entry)))
+			continue;
+		pte_unmap(pte);
+		pte = NULL;
+		folio = __read_swap_cache_async(entry, gfp_mask, mpol, ilx,
+						&page_allocated, false);
+		if (!folio)
+			continue;
+		if (page_allocated) {
+			swap_read_folio(folio, &splug);
+			if (addr != vmf->address) {
+				folio_set_readahead(folio);
+				count_vm_event(SWAP_RA);
 			}
-			pentry = ptep_get_lockless(pte);
-			if (!is_swap_pte(pentry))
-				continue;
-			entry = pte_to_swp_entry(pentry);
-			if (unlikely(non_swap_entry(entry)))
-				continue;
-			pte_unmap(pte);
-			pte = NULL;
-			folio = __read_swap_cache_async(entry, gfp_mask, mpol, ilx,
-							&page_allocated, false);
-			if (!folio)
-				continue;
-			if (page_allocated) {
-				swap_read_folio(folio, &splug);
-				if (addr != vmf->address) {
-					folio_set_readahead(folio);
-					count_vm_event(SWAP_RA);
-				}
-			}
-			folio_put(folio);
+		}
+		folio_put(folio);
 		}
 		if (pte)
 			pte_unmap(pte);
