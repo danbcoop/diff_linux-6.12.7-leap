@@ -65,6 +65,7 @@ static bool enable_vma_readahead __read_mostly = true;
 	(atomic_long_read(&(vma)->swap_readahead_info) ? : 4)
 
 static atomic_t swapin_readahead_hits = ATOMIC_INIT(4);
+static int io_flush_readahead __read_mostly = SWAP_RA_ORDER_CEILING;
 
 /* Leap start */
 unsigned long is_custom_prefetch = 0;
@@ -464,6 +465,10 @@ static inline bool swap_use_vma_readahead(void)
 	return READ_ONCE(enable_vma_readahead) && !atomic_read(&nr_rotate_swap);
 }
 
+static inline int swap_get_io_flush_order(void)
+{
+	return READ_ONCE(io_flush_readahead);
+}
 
 /*
  * Lookup a swap entry in the swap cache. A found folio will be returned
@@ -800,6 +805,8 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	unsigned long offset = entry_offset;
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
+	int io_flush_order;
+	int count = 1;
 	struct swap_info_struct *si = swp_swap_info(entry);
 	struct blk_plug plug;
 	struct swap_iocb *splug = NULL;
@@ -816,7 +823,9 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 			int count = 0;
 			start_offset = offset;
 
-			blk_start_plug(&plug);
+			io_flush_order = swap_get_io_flush_order();
+			if (io_flush_order)
+				blk_start_plug(&plug);
 			for (offset = start_offset; count <= mask; offset += major_delta, count++) {
 				/* Ok, do the async read-ahead now */
 				folio = __read_swap_cache_async(
@@ -832,8 +841,18 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 					}
 				}
 				folio_put(folio);
+				if (io_flush_order && io_flush_order < SWAP_RA_ORDER_CEILING) {
+					if ((count & ((1 << io_flush_order) - 1)) == 0 &&
+							count < win) {
+						blk_finish_plug(&plug);
+						blk_start_plug(&plug);
+					}
+					count++;
+				}
 			}
-			blk_finish_plug(&plug);
+			io_flush_order = swap_get_io_flush_order();
+			if (io_flush_order)
+				blk_start_plug(&plug);
 			swap_read_unplug(splug);
 			lru_add_drain();	/* Push any new pages onto the LRU now */
 			goto skip;
@@ -989,7 +1008,8 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 	struct swap_iocb *splug = NULL;
 	struct folio *folio;
 	pte_t *pte = NULL, pentry;
-	int win;
+	int win, io_flush_order;
+	int count = 1;
 	unsigned long start, end, addr;
 	swp_entry_t entry;
 	pgoff_t ilx;
@@ -1016,8 +1036,11 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 			}
 			
 			ilx = targ_ilx - PFN_DOWN(vmf->address - start);
-
-			blk_start_plug(&plug);
+			
+			io_flush_order = swap_get_io_flush_order();
+			if (io_flush_order)
+				blk_start_plug(&plug);
+			
 			for (addr = start; addr < end; ilx += major_delta,
 					addr += PAGE_SIZE * major_delta) {
 				if (!pte++) {
@@ -1045,10 +1068,19 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 					}
 				}
 				folio_put(folio);
+				if (io_flush_order && io_flush_order < SWAP_RA_ORDER_CEILING) {
+					if ((count & ((1 << io_flush_order) - 1)) == 0 &&
+							count < win) {
+						blk_finish_plug(&plug);
+						blk_start_plug(&plug);
+					}
+					count++;
+				}
 			}
 			if (pte)
 				pte_unmap(pte);
-			blk_finish_plug(&plug);
+			if (io_flush_order)
+				blk_finish_plug(&plug);
 			swap_read_unplug(splug);
 			lru_add_drain();
 			goto skip;
@@ -1139,6 +1171,12 @@ static ssize_t vma_ra_enabled_show(struct kobject *kobj,
 	return sysfs_emit(buf, "%s\n",
 			  enable_vma_readahead ? "true" : "false");
 }
+static ssize_t io_flush_ra_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n",
+			  io_flush_readahead);
+}
 static ssize_t vma_ra_enabled_store(struct kobject *kobj,
 				      struct kobj_attribute *attr,
 				      const char *buf, size_t count)
@@ -1151,10 +1189,24 @@ static ssize_t vma_ra_enabled_store(struct kobject *kobj,
 
 	return count;
 }
+static ssize_t io_flush_ra_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	ret = kstrtoint(buf, 10, &io_flush_readahead);
+	if (ret)
+		return ret;
+
+	return count;
+}
 static struct kobj_attribute vma_ra_enabled_attr = __ATTR_RW(vma_ra_enabled);
+static struct kobj_attribute io_flush_ra_attr = __ATTR_RW(io_flush_ra);
 
 static struct attribute *swap_attrs[] = {
 	&vma_ra_enabled_attr.attr,
+	&io_flush_ra_attr.attr,
 	NULL,
 };
 
