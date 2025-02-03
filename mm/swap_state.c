@@ -806,7 +806,6 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
 	int io_flush_order;
-	int count = 1;
 	struct swap_info_struct *si = swp_swap_info(entry);
 	struct blk_plug plug;
 	struct swap_iocb *splug = NULL;
@@ -843,11 +842,10 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 				folio_put(folio);
 				if (io_flush_order && io_flush_order < SWAP_RA_ORDER_CEILING) {
 					if ((count & ((1 << io_flush_order) - 1)) == 0 &&
-							count < win) {
+							count < mask) {
 						blk_finish_plug(&plug);
 						blk_start_plug(&plug);
 					}
-					count++;
 				}
 			}
 			io_flush_order = swap_get_io_flush_order();
