@@ -485,6 +485,15 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 
 	folio = filemap_get_folio(swap_address_space(entry), swap_cache_index(entry));
 
+    /* Leap */
+    if (get_custom_prefetch()) {
+        if (swap_use_vma_readahead()) {
+            log_swap_trend(PFN_DOWN(addr));
+        } else {
+            log_swap_trend(swp_offset(entry));
+        }
+    }
+    /* Leap end*/
 
 	if (!IS_ERR(folio)) {
 		bool vma_ra = swap_use_vma_readahead();
@@ -509,23 +518,12 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 				hits = min_t(int, hits + 1, SWAP_RA_HITS_MAX);
 			atomic_long_set(&vma->swap_readahead_info,
 					SWAP_RA_VAL(addr, win, hits));
-			/* Leap */
-			if (get_custom_prefetch() != 0 && readahead) {
-				log_swap_trend(PFN_DOWN(addr));
-				
-			}
-			/* Leap end*/
-		}
+        }
 
 		if (readahead) {
 			count_vm_event(SWAP_RA_HIT);
 			if (!vma || !vma_ra) {
 				atomic_inc(&swapin_readahead_hits);
-				/* Leap */
-				if (get_custom_prefetch() != 0) {
-					log_swap_trend(swp_offset(entry));
-				}
-				/* Leap end*/
 			}
 		}
 	} else {
@@ -740,6 +738,7 @@ static unsigned int __swapin_nr_pages(unsigned long prev_offset,
 		 */
 		if (offset != prev_offset + 1 && offset != prev_offset - 1)
 			pages = 1;
+        prev_offset = offset;
 	} else {
 		unsigned int roundup = 4;
 		while (roundup < pages)
@@ -825,6 +824,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 			io_flush_order = swap_get_io_flush_order();
 			if (io_flush_order)
 				blk_start_plug(&plug);
+
 			for (offset = start_offset; count <= mask; offset += major_delta, count++) {
 				/* Ok, do the async read-ahead now */
 				folio = __read_swap_cache_async(
@@ -848,9 +848,8 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 					}
 				}
 			}
-			io_flush_order = swap_get_io_flush_order();
 			if (io_flush_order)
-				blk_start_plug(&plug);
+				blk_finish_plug(&plug);
 			swap_read_unplug(splug);
 			lru_add_drain();	/* Push any new pages onto the LRU now */
 			goto skip;
@@ -1235,4 +1234,3 @@ delete_obj:
 }
 subsys_initcall(swap_init_sysfs);
 #endif
-
