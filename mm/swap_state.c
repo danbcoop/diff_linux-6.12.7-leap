@@ -522,7 +522,7 @@ struct folio *swap_cache_get_folio(swp_entry_t entry,
 
 		if (readahead) {
 			count_vm_event(SWAP_RA_HIT);
-			if (!vma || !vma_ra) {
+			if (!vma || !vma_ra || get_custom_prefetch()) {
 				atomic_inc(&swapin_readahead_hits);
 			}
 		}
